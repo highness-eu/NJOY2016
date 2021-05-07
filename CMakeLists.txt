@@ -5,7 +5,35 @@ find_package( Python3 3.5 REQUIRED )
 
 set( CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "Supported configuration types" FORCE )
 
-project( njoy LANGUAGES Fortran )
+if ( NJOY_NCRYSTAL )
+    if(NOT DEFINED ENV{NCRYSTALDIR})
+    include(FetchContent)
+    FetchContent_Declare(
+        NCrystal
+        GIT_REPOSITORY  https://github.com/highness-eu/ncrystal.git
+        GIT_TAG         origin/develop
+    )
+    FetchContent_GetProperties(NCrystal)
+    if (NOT NCrystal_POPULATED)
+        message( STATUS "Fetching NCrystal" )
+        FetchContent_Populate(NCrystal)
+    endif ()
+    message( STATUS "Adding subdirectory for NCrystal" )
+    get_property(cxx_features GLOBAL PROPERTY CMAKE_CXX_KNOWN_FEATURES)
+    set(CMAKE_CXX_COMPILE_FEATURES ${cxx_features})
+    set(GLOBAL PROPERTY CMAKE_C_COMPILE_FEATURES ${cxx_features})
+    add_subdirectory(${ncrystal_SOURCE_DIR} ${ncrystal_BINARY_DIR})
+    else()
+        message(STATUS "NCRYSTALDIR:" $ENV{NCRYSTALDIR})
+    endif()
+endif()
+
+
+if ( NJOY_NCRYSTAL )
+    project( njoy LANGUAGES Fortran CXX )
+else()
+    project( njoy LANGUAGES Fortran )
+endif()
 get_directory_property( is_subproject PARENT_DIRECTORY )
 include( CMakeDependentOption REQUIRED )
 
@@ -52,7 +80,7 @@ set( CMAKE_Fortran_MODULE_DIRECTORY "${CMAKE_BINARY_DIR}/fortran_modules" CACHE 
 file( MAKE_DIRECTORY "${CMAKE_Fortran_MODULE_DIRECTORY}" )
 
 set( njoy_GNU_Linux_common_flags "-Wall" "-Wextra" )
-set( njoy_GNU_Linux_DEBUG_flags "-O0" "-g" "-gdwarf-3" "-frounding-math" "-fsignaling-nans" "-fcheck=all" "-ffpe-trap=invalid,zero,overflow" )
+set( njoy_GNU_Linux_DEBUG_flags "-O0" "-g" "-gdwarf-3" "-fsignaling-nans" "-fcheck=all" "-ffpe-trap=invalid,zero,overflow" )
 set( njoy_GNU_Linux_RELEASE_flags "-O3" "-DNDEBUG" )
 set( njoy_GNU_Linux_strict_flags "-Werror" )
 set( njoy_GNU_Linux_coverage_flags "--coverage" )
@@ -133,8 +161,7 @@ message( STATUS "Git commit hash: ${GIT_HASH}" )
 message( STATUS "" )
 message( STATUS "-----------------------------------------------------------" )
 
-add_library( njoy ${njoy_library_linkage}
-             "${CMAKE_CURRENT_SOURCE_DIR}/src/acecm.f90"
+set( njoy_sources "${CMAKE_CURRENT_SOURCE_DIR}/src/acecm.f90"
              "${CMAKE_CURRENT_SOURCE_DIR}/src/acedo.f90"
              "${CMAKE_CURRENT_SOURCE_DIR}/src/acefc.f90"
              "${CMAKE_CURRENT_SOURCE_DIR}/src/acepa.f90"
@@ -152,7 +179,6 @@ add_library( njoy ${njoy_library_linkage}
              "${CMAKE_CURRENT_SOURCE_DIR}/src/graph.f90"
              "${CMAKE_CURRENT_SOURCE_DIR}/src/groupr.f90"
              "${CMAKE_CURRENT_SOURCE_DIR}/src/heatr.f90"
-             "${CMAKE_CURRENT_SOURCE_DIR}/src/leapr.f90"
              "${CMAKE_CURRENT_SOURCE_DIR}/src/locale.f90"
              "${CMAKE_CURRENT_SOURCE_DIR}/src/main.f90"
              "${CMAKE_CURRENT_SOURCE_DIR}/src/mainio.f90"
@@ -174,7 +200,25 @@ add_library( njoy ${njoy_library_linkage}
              "${CMAKE_CURRENT_SOURCE_DIR}/src/viewr.f90"
              "${CMAKE_CURRENT_SOURCE_DIR}/src/wimsr.f90" )
 
-target_include_directories( njoy PUBLIC "${CMAKE_Fortran_MODULE_DIRECTORY}" )
+if ( NJOY_NCRYSTAL )
+    set(njoy_sources "${njoy_sources}" "${CMAKE_CURRENT_SOURCE_DIR}/src/ncrystal_generate_bragg_edges.cpp"
+             "${CMAKE_CURRENT_SOURCE_DIR}/src/leapr_ncrystal.f90")
+else()
+    set(njoy_sources "${njoy_sources}" "${CMAKE_CURRENT_SOURCE_DIR}/src/leapr.f90")
+endif()
+
+add_library( njoy "${njoy_library_linkage}" "${njoy_sources}")
+
+if ( NJOY_NCRYSTAL )
+    if( DEFINED ENV{NCRYSTALDIR})
+        target_include_directories( njoy PUBLIC "${CMAKE_Fortran_MODULE_DIRECTORY}" "$ENV{NCRYSTALDIR}/include")
+    else()
+        target_include_directories( njoy PUBLIC "${CMAKE_Fortran_MODULE_DIRECTORY}" "${ncrystal_SOURCE_DIR}/ncrystal_core/include")
+    endif()
+else()
+    target_include_directories( njoy PUBLIC "${CMAKE_Fortran_MODULE_DIRECTORY}" )
+endif()
+
 
 set( PREFIX njoy_${CMAKE_Fortran_COMPILER_ID}_${CMAKE_SYSTEM_NAME} )
 
@@ -195,7 +239,36 @@ $<$<BOOL:${link_time_optimization}>:${${PREFIX}_link_time_optimization_flags}>
 $<$<BOOL:${nonportable_optimization}>:${${PREFIX}_nonportable_optimization_flags}>>
 ${Fortran_appended_flags} ${njoy_appended_flags} )
 
-target_link_libraries( njoy PUBLIC "$<$<AND:$<CONFIG:RELEASE>,$<BOOL:${link_time_optimization}>>:${${PREFIX}_RELEASE_flags};${${PREFIX}_link_time_optimization_flags}$<$<BOOL:${profile_generate}>:${${PREFIX}_profile_generate_flags};>$<$<BOOL:${profile_use}>:${${PREFIX}_profile_use_flags};>$<$<BOOL:${nonportable_optimization}>:${${PREFIX}_nonportable_optimization_flags};>>$<$<CONFIG:DEBUG>:$<$<BOOL:${coverage}>:${${PREFIX}_coverage_flags};>>$<$<BOOL:Fortran_appended_flags>:${Fortran_appended_flags};>$<$<BOOL:njoy_appended_flags>:${njoy_appended_flags};>" )
+#set(njoy_libraries "$<$<AND:$<CONFIG:RELEASE>,$<BOOL:${link_time_optimization}>>;${${PREFIX}_RELEASE_flags};${${PREFIX}_link_time_optimization_flags}
+#$<$<BOOL:${profile_generate}>:${${PREFIX}_profile_generate_flags};>
+#$<$<BOOL:${profile_use}>:${${PREFIX}_profile_use_flags};>
+#$<$<BOOL:${nonportable_optimization}>:${${PREFIX}_nonportable_optimization_flags};>>
+#$<$<CONFIG:DEBUG>:$<$<BOOL:${coverage}>:${${PREFIX}_coverage_flags};>>
+#$<$<BOOL:Fortran_appended_flags>:${Fortran_appended_flags};>
+#$<$<BOOL:njoy_appended_flags>:${njoy_appended_flags};>")
+
+set(njoy_libraries "$<$<AND:$<CONFIG:RELEASE>,$<BOOL:${link_time_optimization}>>:\${${PREFIX}_RELEASE_flags};${${PREFIX}_link_time_optimization_flags}\
+$<$<BOOL:${profile_generate}>:${${PREFIX}_profile_generate_flags};>\
+$<$<BOOL:${profile_use}>:${${PREFIX}_profile_use_flags};>\
+$<$<BOOL:${nonportable_optimization}>:\
+${${PREFIX}_nonportable_optimization_flags};>>\
+$<$<CONFIG:DEBUG>:$<$<BOOL:${coverage}>:${${PREFIX}_coverage_flags};>>\
+$<$<BOOL:Fortran_appended_flags>:${Fortran_appended_flags};>\
+$<$<BOOL:njoy_appended_flags>:${njoy_appended_flags};>")
+
+if ( NJOY_NCRYSTAL )
+    if( DEFINED ENV{NCRYSTALDIR})
+        target_link_libraries( njoy PUBLIC "${njoy_libraries}" "$ENV{NCRYSTALDIR}/lib/libNCrystal.so" )
+    else()
+        target_link_libraries( njoy PUBLIC "${njoy_libraries}" "${ncrystal_BINARY_DIR}/libNCrystal.so" )
+    endif()
+else()
+    target_link_libraries( njoy PUBLIC "${njoy_libraries}" )
+endif()
+
+if ( NJOY_NCRYSTAL AND NOT DEFINED ENV{NCRYSTALDIR})
+    add_dependencies(njoy NCrystal)
+endif()
 
 if ( NOT is_subproject )
     add_executable( njoy_executable src/main.f90 )

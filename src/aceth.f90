@@ -20,6 +20,17 @@ module aceth
 
    ! ace jxs parameters for thermal data
    integer::itie,itix,itxe,itce,itcx,itca,jxsd(26)
+   !--------------------------------------------------------------------!
+   ! The modified ACE format stores three more integers in the jxs(:)   !
+   ! array of the ACE S(a,b) header:                                    !
+   ! jxsd(7)  = itce2 (position for the incoherent energy grid in mixed)!
+   ! jxsd(8)  = itcx2 (position of XS)                                  !
+   ! jxsd(9)  = itca2 (position of angular distribution)                !
+   ! The modified ACE format stores one more integer in the nxs(:)      !
+   ! array of the ACE S(a,b) header:                                    !
+   !  nxsd(8) = ncl2 (angular distribution dimension)                   !
+   !--------------------------------------------------------------------!
+   integer::itce2,itcx2,itca2,ncl2
 
    ! body of the ace data
    integer,parameter::nxss=9000000
@@ -50,7 +61,12 @@ contains
    character(6)::tname
    ! internals
    integer::nw,nwscr,nb,indx,nwt,idis,law
-   integer::ninmax,nea,j,idone,nee,i,neie,loc,iee,iea
+   !--------------------------------------------------------------------!
+   ! nea2,nee2 are dimensioning parameters of the energy and            !
+   ! angle distribution for the incoherent component in mixed.          !
+   !--------------------------------------------------------------------!
+   integer::ninmax,nea,j,idone,nee,i,neie,loc,iee,iea,nea2,nee2
+
    integer::ne,ie,nl,nep,is,nl1,l,isl,isn,k,itype,nang,nn
    real(kr)::fract,x
    real(kr)::temp,em,e,enext,clast,cnow,wtt,emin,sum
@@ -63,7 +79,6 @@ contains
    real(kr),dimension(:),allocatable::six
    real(kr),parameter::eps=1.e-5_kr
    real(kr),parameter::zero=0
-   real(kr),parameter::one=1
    real(kr),parameter::ttol=1
 
    integer::nout=10
@@ -79,7 +94,7 @@ contains
    !--process the thermal data
    nxsd=0
    jxsd=0
-   ninmax=500000
+   ninmax=5000000
    call openz(nin,0)
    nscr=iabs(nscr)
    if (nin.lt.0) nscr=-nscr
@@ -94,7 +109,7 @@ contains
    nw=npage+50
    allocate(xs(nw))
    allocate(six(ninmax))
-   nwscr=500000
+   nwscr=5000000
    allocate(scr(nwscr))
 
    !--determine what endf version is being used
@@ -128,11 +143,25 @@ contains
    enddo
 
    !--copy incoherent (and coherent elastic) cross section to nscr
+   !--------------------------------------------------------------------!
+   ! As before first coherent elastic is copied from PENDF to scratch   !
+   !--------------------------------------------------------------------!
    call findf(matd,3,mti,nin)
    call contio(nin,0,nscr,xs,nb,nw)
    call tosend(nin,0,nscr,xs)
-   if (mte.ne.0.and.ielas.ne.0) then
+   !--------------------------------------------------------------------!
+   ! then incoherent elastic is copied from PENDF tape to scratch tape  !
+   !--------------------------------------------------------------------!
+   if (mte.ne.0.and.ielas.eq.1) then
       call findf(matd,3,mte,nin)
+      call contio(nin,0,nscr,xs,nb,nw)
+      call tosend(nin,0,nscr,xs)
+   !--------------------------------------------------------------------!
+   ! For ielas=2 we need to incoherent after coherent elastic to scratch!
+   ! which is mte+1.                                                    !
+   !--------------------------------------------------------------------!
+   else if (mte.ne.0.and.ielas.eq.2) then
+      call findf(matd,3,mte+1,nin)
       call contio(nin,0,nscr,xs,nb,nw)
       call tosend(nin,0,nscr,xs)
    endif
@@ -202,7 +231,7 @@ contains
          write(nout) (six(1-1+i),i=1,nw)
 
       !--incoherent elastic
-      else
+      else if (ielas.eq.1) then
          call findf(matd,6,mte,nin)
          call contio(nin,0,0,scr,nb,nw)
          call tab1io(nin,0,0,scr,nb,nw)
@@ -250,6 +279,103 @@ contains
          loc=loc-1
          nea=nea-1
          write(nout) neie,nea
+         write(nout) (six(i),i=1,loc)
+      
+      !--------------------------------------------------------------------!
+      ! This is the actual implementation of the mixed elastic.            !
+      !--------------------------------------------------------------------!
+      else if (ielas.eq.2) then      
+         !--------------------------------------------------------------------!
+         ! We first process coherent elastic as usual                         !
+         !--------------------------------------------------------------------!
+         call findf(matd,3,mte,nin)
+         call contio(nin,0,0,scr,nb,nw)
+         e=0
+         call gety1(e,enext,idis,x,nin,scr)
+         nea=0
+
+         !--locate bragg edges and compute cumulative probabilities
+         j=0
+         clast=0
+         idone=0
+         do while (idone.eq.0)
+            e=enext
+            call gety1(e,enext,idis,x,nin,scr)
+            cnow=e*x
+            if (enext.gt.emax.or.abs(enext-emax).le.eps) then
+               idone=1
+            else
+               if ((cnow-clast).gt.(clast+1)/1000000) then
+                  j=j+1
+                  if (2*j.gt.ninmax) call error('acesix',&
+                    'storage six exceeded for coherent reactions.',' ')
+                  six(1+2*(j-1))=e
+                  six(1+2*(j-1)+1)=cnow
+                  clast=cnow
+               endif
+            endif
+         enddo
+
+         !--write out coherent reaction record
+         nee=j
+         nw=2*nee
+         write(nout) nee,nea
+         write(nout) (six(1-1+i),i=1,nw)
+
+         !--incoherent elastic
+         !--------------------------------------------------------------------!
+         ! Then we process the incoherent elastic with mt=mte+1               !
+         ! We use the nea2 and nee2 dimensioning parameters                   !
+         !--------------------------------------------------------------------!
+
+         call repoz(nscr)
+         call findf(matd,6,mte+1,nin)
+         call contio(nin,0,0,scr,nb,nw)
+         call tab1io(nin,0,0,scr,nb,nw)
+         call tab2io(nin,0,0,scr,nb,nw)
+         nee2=nint(scr(6))
+         neie=0
+         call repoz(nscr)
+         call findf(matd,3,mte+1,nscr)
+         call contio(nscr,0,0,xs,nb,nw)
+         e=0
+         call gety1(e,enext,idis,x,nscr,xs)
+         loc=1
+         idone=0
+         iee=0
+         do while (iee.lt.nee2.and.idone.eq.0)
+            iee=iee+1
+            indx=1
+            call listio(nin,0,0,scr(indx),nb,nw)
+            indx=indx+nw
+            if (indx.gt.nwscr) call error('acesix',&
+              'exceeded scr storage for incoherent elastic',' ')
+            do while (nb.ne.0)
+               if (indx.gt.nwscr-npage) call error('acesix',&
+                 'exceeded scr storage for incoherent elastic',' ')
+               call moreio(nin,0,0,scr(indx),nb,nw)
+               indx=indx+nw
+            enddo
+            nea2=nint(scr(6))-1
+            e=scr(7)
+            if (e.gt.emax.or.abs(e-emax).lt.eps) then
+               idone=1
+            else
+               neie=neie+1
+               call gety1(e,enext,idis,x,nscr,xs)
+               if (loc.gt.ninmax-nea2-1) call error('acesix',&
+                 'exceeded six storage for incoherent elastic',' ')
+               six(loc)=e
+               six(loc+1)=x
+               do iea=2,nea2
+                  six(iea+loc)=scr(iea+7)
+               enddo
+               loc=loc+1+nea2
+            endif
+         enddo
+         loc=loc-1
+         nea2=nea2-1
+         write(nout) neie,nea2
          write(nout) (six(i),i=1,loc)
       endif
    endif
@@ -358,7 +484,12 @@ contains
    y=scr(is+7+nl1*(i-1))
   250 continue
    add=(y+yl)*(x-xl)/2
-   if (x.eq.xl) go to 280
+   !--------------------------------------------------------------------!
+   ! We have fixed equality statements for reals by comparing against a !
+   ! tiny number epsilon_real defined in locale.f90. Only the first     !
+   ! occurance is commented about.                                      !
+   !--------------------------------------------------------------------!
+   if (abs(x-xl).lt.epsilon_real) go to 280
    if (iwt.le.1.and.i.eq.nep.and.j.eq.nbin-1) then
       xn=x
       j=j+1
@@ -513,8 +644,11 @@ contains
   290 continue
 
    !--write ace format thermal tape
-   call thrlod(nout,matd,tempd,tname,suff,izn,&
-     nbin,nang,nmix,iwt,mcnpx)
+   !--------------------------------------------------------------------!
+   ! We pass in ielas to help recognize mixed elastic implementation    !
+   !--------------------------------------------------------------------!
+   call thrlod(nout,matd,tempd,tname,suff,&
+     nbin,nang,nmix,iwt,mcnpx,ielas)
    if (iprint.gt.0) call thrprt(hk)
    itype=1
    call throut(itype,nace,ndir,mcnpx,hk,izn,awn)
@@ -540,14 +674,11 @@ contains
    real(kr)::awn(16)
    ! internals
    integer::l,j,n,max,i
-   integer::indx,idiff,isuff,lenhz
    integer::izo(16)
    real(kr)::awo(16)
    character(70)::hko
-   real(kr),parameter::zero=0
 
    integer,parameter::ner=1
-   integer,parameter::nbw=1
 
    !--read type 1 ace format file
    call openz(nin,0)
@@ -565,6 +696,14 @@ contains
       read (nin,'(8i9)')&
         len2,idpni,nil,nieb,idpnc,ncl,ifeng,nxsd,&
         itie,itix,itxe,itce,itcx,itca,jxsd
+      !--------------------------------------------------------------------!
+      ! Read in additional JXS and NXS parameters                          !
+      !--------------------------------------------------------------------!
+      itce2 = jxsd(1)
+      itcx2 = jxsd(2)
+      itca2 = jxsd(3)
+      ncl2 =nxsd(1)
+
       n=(len2+3)/4
       n=n-1
       l=0
@@ -614,8 +753,11 @@ contains
    return
    end subroutine thrfix
 
-   subroutine thrlod(nin,matd,tempd,tname,suff,izn,&
-     nbini,nang,nmix,iwt,mcnpx)
+   !--------------------------------------------------------------------!
+   ! We pass in ielas to help recognize mixed elastic implementation    !
+   !--------------------------------------------------------------------!
+   subroutine thrlod(nin,matd,tempd,tname,suff,&
+     nbini,nang,nmix,iwt,mcnpx,ielas)
    !-------------------------------------------------------------------
    ! write a thermal output tape in ace format.
    !-------------------------------------------------------------------
@@ -623,19 +765,22 @@ contains
    use util ! provides date,repoz
    use mainio ! provides nsyso
    ! externals
-   integer::nin,matd,nbini,nang,nmix,iwt,mcnpx
+   integer::nin,matd,nbini,nang,nmix,iwt,mcnpx,ielas
    real(kr)::tempd,suff
-   integer::izn(16)
    character(6)::tname
    ! internals
    integer::nwscr,nw,i,loc,indx,j,k,jang
    integer::nee,nea,nce,nie
+   !--------------------------------------------------------------------!
+   ! We define additional dimensioning parameters                       !
+   !--------------------------------------------------------------------!
+   integer::nce2,nee2,nea2
    character(8)::hdt
    real(kr),dimension(:),allocatable::scr
    real(kr),parameter::emev=1.e6_kr
 
    !--initialize
-   nwscr=500000
+   nwscr=5000000
    allocate(scr(nwscr))
    write(hm,'(''   mat'',i4)') matd
    tz=tempd*bk/emev
@@ -664,10 +809,71 @@ contains
    itxe=itix+nie
    if (ifeng.gt.1) len2=len2+2*nie
    len2=len2+itxe-1
+   !--------------------------------------------------------------------!
+   ! We initialize itce2,itcx2 and itca2 to zero                        !
+   !--------------------------------------------------------------------!
+   itce2=0
+   itcx2=0
+   itca2=0
    if (nee.gt.0) then
       itce=len2+1
       itcx=itce+nee+1
       len2=itcx+nee-1
+
+      !--------------------------------------------------------------------!
+      ! The preparation of the ACE file starts by reading the parameters   !
+      ! from the temporary file. If we ielas is equal to 2 we continue with!
+      ! the mixed elastic processing right away.                           !
+      !--------------------------------------------------------------------!
+      if (ielas.eq.2) then
+        xss(itce)=nce
+        nw=2*nee
+        !--------------------------------------------------------------------!
+        ! We set IDPNC=5 as the flag for mixed elastic moderator in the ACE  ! 
+        ! header.                                                            !
+        !--------------------------------------------------------------------!
+        idpnc=5
+
+        !--------------------------------------------------------------------!
+        !! First block is coherent, so ncl must be -1                        !
+        !--------------------------------------------------------------------!
+        ncl=-1 
+        
+        read(nin) (scr(i),i=1,nw)
+        do i=1,nee
+            xss(i+itce)=scr(1+2*(i-1))/emev
+            xss(i+nee+itce)=scr(2+2*(i-1))/emev/nmix
+        enddo
+        read(nin) nee2,nea2
+        nce2=nee2
+        !--------------------------------------------------------------------!
+        ! Second block is incoherent                                         !
+        !--------------------------------------------------------------------!
+        ncl2=nea2-1 
+
+        !--------------------------------------------------------------------!
+        ! We now read the second reaction (incoherent)                       !
+        !--------------------------------------------------------------------!
+        itce2=len2+1
+        itcx2=itce2+nee2+1
+        itca2=itcx2+nee2
+        len2=itca2+nee2*nea2-1
+        nw=nee2*(2+nea2)
+        if (nw.gt.nwscr) call error('thrlod','scr exceeded',' ')
+        read(nin) (scr(i),i=1,nw)
+        loc=itca2-1
+        indx=1
+        xss(itce2)=nce2
+        do i=1,nee2
+          xss(itce2+i)=scr(indx)/emev
+          xss(itce2+nee2+i)=scr(indx+1)/nmix
+          do j=1,nea2
+             xss(j+loc)=scr(indx+1+j)
+          enddo
+          loc=loc+nea2
+          indx=indx+nea2+2
+        enddo
+      endif
    endif
    itca=0
    if (nee.gt.0.and.nea.gt.0) then
@@ -679,8 +885,11 @@ contains
       call error('thrlod','xss too small',' ')
    endif
 
+   !--------------------------------------------------------------------!
+   ! As usual process coherent and incoherent for ileas<2               !
+   !--------------------------------------------------------------------!
    !--check for elastic data
-   if (nee.ne.0) then
+   if (nee.ne.0.and.ielas.ne.2) then
       xss(itce)=nce
 
       !--process coherent elastic data
@@ -777,11 +986,21 @@ contains
    character(7),parameter::labl5='section'
    character(10),parameter::dash4='    '
    character(10),parameter::dash10='          '
+   !--------------------------------------------------------------------!
+   ! We define additional dimensioning parameters                       !
+   !--------------------------------------------------------------------!
+   integer::nee2,nea2
 
    !--print thermal header information
    nie=nint(xss(itie))
    nee=0
    if (itce.gt.0) nee=nint(xss(itce))
+
+   !--------------------------------------------------------------------!
+   ! We initialize nee2                                                 !
+   !--------------------------------------------------------------------!
+   if (itce.gt.0.and.idpnc.eq.5)nee2=nint(xss(itce2))
+
    write(nsyso,'(''1''///////&
      &38x,''zaid'',1x,a13/39x,''awr'',f10.3/&
      &38x,''temp'',1p,e10.2/38x,''date'',a10/39x,''mat'',a10/&
@@ -873,7 +1092,7 @@ contains
    if (nee.eq.0) return
 
    !--print incoherent elastic data
-   if (idpnc.ne.4) then
+   if (idpnc.eq.3) then
       nea=ncl+1
       write(nsyso,'(''1''/&
         &'' incoherent elastic data - equally probable angles''/&
@@ -904,7 +1123,7 @@ contains
       enddo
 
    !--print coherent elastic data
-   else
+   else if (idpnc.eq.4) then
       write(nsyso,'(''1''/&
         &'' coherent elastic data - bragg edges and cumulative '',&
         &''intensity''/&
@@ -961,6 +1180,102 @@ contains
          enddo
          if (ifini.eq.0) indx=itce+1+200*ipg
       enddo
+   
+   !--------------------------------------------------------------------!
+   ! Here we print mixed elastic data                                   !
+   !--------------------------------------------------------------------!
+   else if (idpnc.eq.5) then
+      !--------------------------------------------------------------------!
+      ! Print coherent elastic data first                                  !
+      !--------------------------------------------------------------------!
+      write(nsyso,'(''1''/&
+        &'' coherent elastic data - bragg edges and cumulative '',&
+        &''intensity''/&
+        &'' ---------------------------------------------------'',&
+        &''---------'')')
+      ncol=(nee+49)/50
+      npg=(ncol+3)/4
+      ipg=0
+      indx=itce+1
+      do while (ipg.lt.npg)
+         ipg=ipg+1
+         if (ipg.gt.1) write(nsyso,'(''1'')')
+         mcol=ncol
+         if (mcol.gt.4) mcol=4
+         ncol=ncol-mcol
+         write(nsyso,'(/4(9x,a10,5x,a7,1x))') (labl1,labl2,j=1,mcol)
+         write(nsyso,'(5x,3(a1,5x,a6,7x,a7,6x),a1,5x,a6,7x,a7)')&
+           (labl3,labl4,labl5,j=1,mcol)
+            write(nsyso,'(4(2x,a4,3x,a10,3x,a10))')&
+           (dash4,dash10,dash10,j=1,mcol)
+         ifini=0
+         i=0
+         do while (i.lt.50.and.ifini.eq.0)
+            i=i+1
+            ind(1)=indx-itce
+            b(1)=xss(indx)
+            c(1)=xss(indx+nee)
+            if (mcol.gt.1) then
+               ind(2)=indx+50-itce
+               b(2)=xss(indx+50)
+               c(2)=xss(indx+nee+50)
+               if (mcol.gt.2) then
+                  ind(3)=indx+100-itce
+                  b(3)=xss(indx+100)
+                  c(3)=xss(indx+nee+100)
+                  if (mcol.gt.3) then
+                     ind(4)=indx+150-itce
+                     b(4)=xss(indx+150)
+                     c(4)=xss(indx+nee+150)
+                  endif
+               endif
+            endif
+            write(nsyso,&
+              '(i6,1p,2e13.4,i6,2e13.4,i6,2e13.4,i6,2e13.4)')&
+              (ind(j),b(j),c(j),j=1,mcol)
+            indx=indx+1
+            if (ipg.ge.npg) then
+               if (indx-itce.gt.nee) ifini=1
+               if (ifini.ne.1) then
+                  if ((indx-itce+(mcol-1)*50).gt.nee) mcol=mcol-1
+                  if (mcol.eq.0) ifini=1
+               endif
+            endif
+         enddo
+         if (ifini.eq.0) indx=itce+1+200*ipg
+      enddo
+      
+      !--------------------------------------------------------------------!
+      ! Print incoherent elastic data second                               !
+      !--------------------------------------------------------------------!
+      nea2=ncl2+1
+      write(nsyso,'(''1''/&
+        &'' incoherent elastic data - equally probable angles''/&
+        &'' -------------------------------------------------''/)')
+      write(nsyso,'(/&
+        &9x,''incident'',9x,''cross''/&
+        &4x,''i'',5x,''energy'',9x,''section'',25x,''angles'')')
+      lines=7
+      nln=(nea2+8)/9
+      lim=nea2
+      if (nea2.gt.8) lim=8
+      lim1=lim+1
+      loc=itca2-1
+      do i=1,nee2
+         if ((lines+nln).gt.58) then
+            write(nsyso,'(''1'')')
+            write(nsyso,'(/&
+              &9x,''incident'',9x,''cross''/&
+              &4x,''i'',5x,''energy'',9x,''section'',25x,''angles'')')
+            lines=4
+         endif
+         write(nsyso,'(/2x,i3,1x,1p,e12.4,3x,e12.4,3x,0p,8f10.4)')&
+           i,xss(itce2+i),xss(itce2+nee2+i),(xss(loc+j),j=1,lim)
+         if (nea2.gt.8) write(nsyso,'(36x,8f10.4)')&
+           (xss(loc+j),j=lim1,nea2)
+         loc=loc+nea2
+         lines=lines+nln
+      enddo
    endif
    return
    end subroutine thrprt
@@ -988,6 +1303,11 @@ contains
    real(kr),parameter::scale=1.e6_kr
    real(kr),parameter::zero=0
    real(kr),parameter::one=1
+   !--------------------------------------------------------------------!
+   ! Add nee2 for mixed elastic, although nee2=nie                      !
+   !--------------------------------------------------------------------!
+   integer::nee2
+   real(kr)::xincohelas
 
    !--black and white pages
    ipcol=0
@@ -1002,6 +1322,10 @@ contains
    nie=nint(xss(itie))
    nee=0
    if (itce.gt.0) nee=nint(xss(itce))
+   !--------------------------------------------------------------------!
+   ! For mixed elastic initialize nee2                                  !
+   !--------------------------------------------------------------------!
+   if (itce.gt.0.and.idpnc.eq.5)nee2=nint(xss(itce2))
 
    !--plot log-log total, inelastic, and elastic (if present)
    xmin=big
@@ -1015,7 +1339,7 @@ contains
       if (e.gt.xmax) xmax=e
       if (xnelas.lt.ymin) ymin=xnelas
       if (xnelas.gt.ymax) ymax=xnelas
-      if (nee.ne.0) then
+      if (nee.ne.0.and.idpnc.ne.5) then
          j=0
          xelas=0
          do while (j.lt.nee)
@@ -1030,6 +1354,35 @@ contains
          enddo
          if (xelas.gt.zero) then
             tot=xnelas+xelas
+            if (xelas.lt.ymin) ymin=xelas
+            if (xelas.gt.ymax) ymax=xelas
+            if (tot.lt.ymin) ymin=tot
+            if (tot.gt.ymax) ymax=tot
+         endif
+      endif
+      !--------------------------------------------------------------------!
+      ! Adjust ymin and ymax for mixed elastic                             !
+      !--------------------------------------------------------------------!
+      if (idpnc.eq.5) then
+         xincohelas=xss(itce2+nee2+i)
+         if (xincohelas.lt.ymin) ymin=xincohelas
+         if (xincohelas.gt.ymax) ymax=xincohelas
+      endif
+      if (nee.ne.0.and.idpnc.eq.5) then
+         j=0
+         xelas=0
+         do while (j.lt.nee)
+            j=j+1
+            e1=xss(itce+j)
+            x1=xss(itce+nee+j)
+            x1=x1/e1
+            e2=xss(itce+j+1)
+            x2=xss(itce+nee+j+1)
+            x2=x2/e2
+            if (e.ge.e1.and.e.le.e2) xelas=x1+(e-e1)*(x2-x1)/(e2-e1)
+         enddo
+         if (xelas.gt.zero) then
+            tot=xnelas+xincohelas+xelas
             if (xelas.lt.ymin) ymin=xelas
             if (xelas.gt.ymax) ymax=xelas
             if (tot.lt.ymin) ymin=tot
@@ -1069,7 +1422,7 @@ contains
       write(nout,'(1p,2e14.6,''/'')') e,xs
    enddo
    write(nout,'(''/'')')
-   if (nee.ne.0) then
+   if (nee.ne.0.and.idpnc.ne.5) then
       write(nout,'(''2/'')')
       write(nout,'(''/'')')
       if (iwcol.eq.0) then
@@ -1186,6 +1539,176 @@ contains
             write(nout,'(1p,2e14.6,''/'')') e,tot
          enddo
       endif
+      write(nout,'(''/'')')
+   endif
+   
+   !--------------------------------------------------------------------!
+   !--plot mixed elastic (idpnc=5) if present                           !
+   !--------------------------------------------------------------------!
+   if (nee.ne.0.and.idpnc.eq.5) then
+      !--------------------------------------------------------------------!
+      ! First write coherent elastic part                                  !
+      !--------------------------------------------------------------------!
+      write(nout,'(''2/'')')
+      write(nout,'(''/'')')
+      if (iwcol.eq.0) then
+         write(nout,'(''0 0 1/'')')
+      else
+         write(nout,'(''0 0 0 2/'')')
+      endif
+      write(nout,'(a,''coherent elastic'',a,''/'')') qu,qu
+      write(nout,'(''0/'')')
+      e=xss(itce+1)-xss(itce+1)/1000
+      xs=xss(itce+nee+1)/e
+      xs=xs/100
+      write(nout,'(1p,2e14.6,''/'')') e,xs
+      do i=1,nee
+         e=xss(itce+i)
+         xs=xss(itce+nee+i)
+         xs=xs/e
+         write(nout,'(1p,2e14.6,''/'')') e,xs
+         if (i.lt.nee) then
+            e=xss(itce+i+1)-xss(itce+i+1)/1000
+            xs=xss(itce+nee+i)/e
+            write(nout,'(1p,2e14.6,''/'')') e,xs
+         endif
+      enddo
+      do i=1,25
+         e=e+e/10
+         if (e.gt.xmax) exit
+         xs=xss(itce+2*nee)/e
+         write(nout,'(1p,2e14.6,''/'')') e,xs
+      enddo
+      
+      !--------------------------------------------------------------------!
+      ! Then write incoherent elastic part                                 !
+      !--------------------------------------------------------------------!
+      write(nout,'(''/'')')
+      write(nout,'(''3/'')')
+      write(nout,'(''/'')')
+      if (iwcol.eq.0) then
+         write(nout,'(''0 0 1/'')')
+      else
+         write(nout,'(''0 0 0 3/'')')
+      endif
+      write(nout,'(a,''incoherent elastic'',a,''/'')') qu,qu
+      write(nout,'(''0/'')')
+      do i=1,nee2
+         e=xss(itce2+i)
+         xs=xss(itce2+nee2+i)
+         write(nout,'(1p,2e14.6,''/'')') e,xs
+      enddo
+      
+      !--------------------------------------------------------------------!
+      ! Then write total scattering cross section part                     !
+      !--------------------------------------------------------------------!
+      write(nout,'(''/'')')
+      write(nout,'(''4/'')')
+      write(nout,'(''/'')')
+      write(nout,'(''/'')')
+      write(nout,'(a,''total'',a,''/'')') qu,qu
+      write(nout,'(''0/'')')
+      i=0
+      idone=0
+      e=0
+      do while (idone.eq.0.and.i.lt.nee)
+         i=i+1
+         e=xss(itie+i)
+         if (e.ge.xss(itce+1)) then
+            idone=1
+         else
+            !--------------------------------------------------------------------!
+            ! Since inelastic and incoherent elastic have the same               !
+            ! energy grid, we will add them up first, before interpolating       !
+            ! for coherent elastic: xs=xss(itie+nie+i)+xss(itce2+nee2+i)         !
+            !--------------------------------------------------------------------!
+            xs=xss(itie+nie+i)+xss(itce2+nee2+i)
+            write(nout,'(1p,2e14.6,''/'')') e,xs
+         endif
+      enddo
+      e=xss(itce+1)-xss(itce+1)/1000
+      j=0
+      do while (j.lt.nie)
+         j=j+1
+         e1=xss(itie+j)
+         !--------------------------------------------------------------------!
+         ! Add inelastic and incoherent elastic here too                      !
+         !--------------------------------------------------------------------!
+         x1=xss(itie+nie+j)+xss(itce2+nee2+j)
+         e2=xss(itie+j+1)
+         !--------------------------------------------------------------------!
+         ! Add inelastic and incoherent elastic here too                      !
+         !--------------------------------------------------------------------!
+         x2=xss(itie+nie+j+1)+xss(itce2+nee2+j+1)
+         if (e.ge.e1.and.e.le.e2) xn=x1+(e-e1)*(x2-x1)/(e2-e1)
+      enddo
+      tot=xn
+      write(nout,'(1p,2e14.6,''/'')') e,tot
+      do i=1,nee
+         e=xss(itce+i)
+         xs=xss(itce+nee+i)
+         xs=xs/e
+         j=0
+         do while (j.lt.nie)
+            j=j+1
+            e1=xss(itie+j)
+            !--------------------------------------------------------------------!
+            ! Add inelastic and incoherent elastic here too                      !
+            !--------------------------------------------------------------------!
+            x1=xss(itie+nie+j)+xss(itce2+nee2+j)
+            e2=xss(itie+j+1)
+            !--------------------------------------------------------------------!
+            ! Add inelastic and incoherent elastic here too                      !
+            !--------------------------------------------------------------------!
+            x2=xss(itie+nie+j+1)+xss(itce2+nee2+j+1)
+            if (e.ge.e1.and.e.le.e2) xn=x1+(e-e1)*(x2-x1)/(e2-e1)
+         enddo
+         tot=xs+xn
+         write(nout,'(1p,2e14.6,''/'')') e,tot
+         if (i.lt.nee) then
+            e=xss(itce+i+1)-xss(itce+i+1)/1000
+            xs=xss(itce+nee+i)/e
+            j=0
+            do while (j.lt.nie)
+               j=j+1
+               e1=xss(itie+j)
+               !--------------------------------------------------------------------!
+               ! Add inelastic and incoherent elastic here too                      !
+               !--------------------------------------------------------------------!
+               x1=xss(itie+nie+j)+xss(itce2+nee2+j)
+               e2=xss(itie+j+1)
+               !--------------------------------------------------------------------!
+               ! Add inelastic and incoherent elastic here too                      !
+               !--------------------------------------------------------------------!
+               x2=xss(itie+nie+j+1)+xss(itce2+nee2+j+1)
+               if (e.ge.e1.and.e.le.e2) xn=x1+(e-e1)*(x2-x1)/(e2-e1)
+            enddo
+            tot=xs+xn
+            write(nout,'(1p,2e14.6,''/'')') e,tot
+         endif
+      enddo
+      do i=1,25
+         e=e+e/10
+         if (e.gt.xmax) exit
+         xs=xss(itce+2*nee)/e
+         j=0
+         do while (j.lt.nie)
+            j=j+1
+            e1=xss(itie+j)
+            !--------------------------------------------------------------------!
+            ! Add inelastic and incoherent elastic here too                      !
+            !--------------------------------------------------------------------!
+            x1=xss(itie+nie+j)+xss(itce2+nee2+j)
+            e2=xss(itie+j+1)
+            !--------------------------------------------------------------------!
+            ! Add inelastic and incoherent elastic here too                      !
+            !--------------------------------------------------------------------!
+            x2=xss(itie+nie+j+1)+xss(itce2+nee2+j+1)
+            if (e.ge.e1.and.e.le.e2) xn=x1+(e-e1)*(x2-x1)/(e2-e1)
+         enddo
+         tot=xs+xn
+         write(nout,'(1p,2e14.6,''/'')') e,tot
+      enddo
       write(nout,'(''/'')')
    endif
 
@@ -1316,7 +1839,7 @@ contains
       write(nout,'(1p,2e14.6,''/'')') e,ubar
    enddo
    write(nout,'(''/'')')
-   if (nee.ne.0) then
+   if (nee.ne.0.and.idpnc.ne.5) then
       write(nout,'(''2/'')')
       write(nout,'(''/'')')
       if (iwcol.eq.0) then
@@ -1366,6 +1889,74 @@ contains
             loc=loc+ncl+1
          enddo
       endif
+      write(nout,'(''/'')')
+   endif
+   
+   !--------------------------------------------------------------------!
+   !--mubar plot for mixed elastic if present                           !
+   !--------------------------------------------------------------------!
+   if (nee.ne.0.and.idpnc.eq.5) then
+      !--------------------------------------------------------------------!
+      ! Write coherent elastic part                                        !
+      !--------------------------------------------------------------------! 
+      write(nout,'(''2/'')')
+      write(nout,'(''/'')')
+      if (iwcol.eq.0) then
+         write(nout,'(''0 0 1/'')')
+      else
+         write(nout,'(''0 0 0 2/'')')
+      endif
+      write(nout,'(a,''coherent elastic'',a,''/'')') qu,qu
+      write(nout,'(''0/'')')
+      e=xss(itce+1)
+      ell=xss(itce+nee)
+      do while (e.le.ell)
+         idone=0
+         i=0
+         ubar=0
+         sum=0
+         bl=0
+         do while (idone.eq.0.and.i.lt.nee)
+            i=i+1
+            ei=xss(itce+i)
+            if (ei.gt.e) then
+               idone=1
+            else
+               ui=1-2*ei/e
+               bi=(xss(itce+nee+i)-bl)
+               ubar=ubar+bi*ui/e
+               sum=sum+bi/e
+            endif
+            bl=xss(itce+nee+i)
+         enddo
+         ubar=ubar/sum
+         write(nout,'(1p,2e14.6,''/'')') e,ubar
+         e=e+e/50
+      enddo
+      write(nout,'(''/'')')
+      
+      !--------------------------------------------------------------------!
+      ! Write incoherent elastic part                                      !
+      !--------------------------------------------------------------------!
+      write(nout,'(''3/'')')
+      write(nout,'(''/'')')
+      if (iwcol.eq.0) then
+         write(nout,'(''0 0 1/'')')
+      else
+         write(nout,'(''0 0 0 3/'')')
+      endif    
+      write(nout,'(a,''incoherent elastic'',a,''/'')') qu,qu
+         write(nout,'(''0/'')')
+         loc=itca2-1
+         do i=1,nee2
+            e=xss(itce2+i)
+            ubar=0
+            do j=1,ncl2+1
+               ubar=ubar+xss(loc+j)/(ncl2+1)
+            enddo
+            write(nout,'(1p,2e14.6,''/'')') e,ubar
+            loc=loc+ncl2+1
+         enddo
       write(nout,'(''/'')')
    endif
 
@@ -1890,7 +2481,7 @@ contains
 
    !--find minimum span per interval
    fm=m
-   if (zmax.eq.zero.or.zmin.eq.zero) then
+   if ((abs(zmax-zero).lt.epsilon_real).or.(abs(zmin-zero).lt.epsilon_real)) then
       zmax=zmax-abs(zmax)/1000000
       zmin=zmin+abs(zmin)/1000000
    else
@@ -2065,6 +2656,14 @@ contains
            '(a13,f12.6,1x,1p,e11.4,1x,a10/a70,a10)')&
            hz(1:13),aw0,tz,hd,hk,hm
       endif
+      !--------------------------------------------------------------------!
+      ! Store the integer parameters in jxs,nxs. Note that jxsd is shifted.!
+      !--------------------------------------------------------------------!
+      jxsd(1) = itce2
+      jxsd(2) = itcx2
+      jxsd(3) = itca2
+      nxsd(1) = ncl2
+
       write(nout,'(4(i7,f11.0))') (izn(i),awn(i),i=1,16)
       write(nout,'(8i9)') &
         len2,idpni,nil,nieb,idpnc,ncl,ifeng,nxsd,&
@@ -2121,6 +2720,34 @@ contains
             call typen(l,nout,2)
             l=l+1
          enddo
+      endif
+      if(idpnc.eq.5) then
+        !--------------------------------------------------------------------!
+        ! After writing the inelastic and the coherent elastic blocks        !
+        ! we now write the incoherent elastic block for mixed moderators.    !
+        !--------------------------------------------------------------------!
+        !--itce2 block
+        if (itce2.ne.0) then
+          l=itce2
+          ne=nint(xss(l))
+          nexe=ne
+          call typen(l,nout,1)
+          l=l+1
+          n=2*ne
+          do i=1,n
+              call typen(l,nout,2)
+              l=l+1
+          enddo
+        endif
+
+        !--itca2 block
+        if (itce2.ne.0.and.ncl2.ne.-1) then
+          n=nexe*(ncl2+1)
+          do i=1,n
+              call typen(l,nout,2)
+              l=l+1
+          enddo
+        endif
       endif
 
       !--finished

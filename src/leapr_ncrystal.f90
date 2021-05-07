@@ -375,7 +375,7 @@ contains
    if (iel.ge.98) then
       read(nsysi,*) ncrystal_command
       ntemp_elastic = ntempr
-      maxb=500000
+      maxb=10000000
       allocate(bragg(maxb,ntemp_elastic))
       allocate(nedge(ntemp_elastic))
       allocate(last_edge(ntemp_elastic))
@@ -510,10 +510,52 @@ contains
          !--------------------------------------------------------------------!
          
          if (iel.ge.98) then
-            write(nsyso,'(/''*** NCrystal option not enabled'',&
-                       &'' recompile with  -D NJOY_NCRYSTAL=True. ***'')')
-            call error('leapr',' NCrystal option not enabled ',&
-                       &'recompile with  -D NJOY_NCRYSTAL=True.')
+            current_temp(itemp)=abs(temp)
+            call ncrystal_wrapper(ncrystal_command, bragg(:,itemp), nedge(itemp), maxb, &
+            current_temp(itemp), atomic_z, atomic_a, bound_incoherent_xs, bound_coherent_xs, spr, &
+            ncrystal_msd)
+            leapr_msd=dwpix(itemp)/(awr*bk*current_temp(itemp))*hbar_mine**2/(2*mass_neutron)
+            write(nsyso,'(/&
+              &  '' NCrystal MSD ......................... '',es10.3/&
+              &  '' LEAPR MSD ............................ '',es10.3)')&
+              &  ncrystal_msd, leapr_msd
+
+            if (itemp .gt. 1) then
+               if (current_temp(itemp).lt.current_temp(itemp-1)) then
+                  strng = 'Temperatures need to be in the increasing order.'
+                  call error('leapr',strng,' ') 
+               endif
+               last_edge(itemp) = bragg(2*nedge(itemp), itemp)
+               do i=nedge(itemp),nedge(1)
+                   bragg(2*i+1,itemp) = bragg(2*i+1,1)
+                   bragg(2*i+2,itemp) = last_edge(itemp)                 
+               enddo
+            endif
+
+            if (iel.eq.98 .or. iel.eq.99) then
+               if (bound_coherent_xs.gt.bound_incoherent_xs) then
+                  coherent_or_incoherent=1
+                  if (iel.eq.99) then
+                     do i=1,nedge(itemp)
+                        bragg(2*i,itemp) = bragg(2*i,itemp)/bound_coherent_xs*&
+                        (bound_coherent_xs+bound_incoherent_xs)                
+                     enddo
+                  endif
+               else if (bound_coherent_xs.lt.bound_incoherent_xs) then
+                  coherent_or_incoherent=2
+                  if (iel.eq.99) then
+                     bound_incoherent_xs=bound_incoherent_xs+bound_coherent_xs
+                  endif
+               endif
+            endif 
+            if (iel.eq.100 .and. bound_incoherent_xs < 1e-6*bound_coherent_xs ) then
+               iel = 99
+               write(nsyso,'(/&
+                &''*** Warning. sigma_inc < 1e-6*sigma_coh. '',&
+                &''Material will be treated as coherent, not mixed ***'')')
+               call mess('leapr',' Warning. sigma_inc < 1e-6*sigma_coh. ',&
+                'Material will be treated as coherent, not mixed.')
+            endif
          endif
 
       !--continue temperature loop
@@ -2579,6 +2621,81 @@ contains
    enddo
    return
    end subroutine copys
+
+   !--------------------------------------------------------------------!
+   ! Here we define ncrystal_wrapper!!!                                 !
+   !--------------------------------------------------------------------!  
+   subroutine ncrystal_wrapper(ncrystal_command, bragg, nedge, maxb, current_temp, &
+   atomic_z, atomic_a, bound_incoherent_xs,bound_coherent_xs, spr, ncrystal_msd)
+   !--------------------------------------------------------------------!
+   ! Computes Bragg edges (energy times cross section) for coherent     !
+   ! elastic scattering by calling NCrystal. Also obtains the incoherent!
+   ! bound cross section, that will be used to calculate the incoherent !
+   ! cross section. Also for consistency between NCrystal and LEAPR     !
+   ! free atom scatterin cross section (spr) is also passed back from   !
+   ! NCrystal and used instead of the one user provided.                 !
+   !--------------------------------------------------------------------!
+
+   use, intrinsic :: iso_c_binding
+
+   interface
+     subroutine generate_bragg_edges( c_s, c_nbragg, c_bragg, c_current_temp, &
+     c_maxb, c_atomic_z, c_atomic_a, c_bound_incoherent_xs, &
+     c_bound_coherent_xs, c_spr ,c_ncrystal_msd) bind ( c )
+       use iso_c_binding
+       character(len=1, kind=c_char), dimension(*), intent(in) :: c_s
+       integer ( c_int ) :: c_nbragg
+       real ( c_double ) :: c_bragg(*)
+       real ( c_double ) :: c_current_temp
+       integer ( c_int ) :: c_maxb
+       integer ( c_int ) :: c_atomic_z
+       integer ( c_int ) :: c_atomic_a
+       real ( c_double ) :: c_bound_incoherent_xs
+       real ( c_double ) :: c_bound_coherent_xs
+       real ( c_double ) :: c_spr
+       real ( c_double ) :: c_ncrystal_msd
+
+     end subroutine generate_bragg_edges
+   end interface
+
+   integer ( c_int ) :: c_nbragg = 0
+   real ( c_double ) :: c_bragg(maxb)
+   real ( c_double ) :: c_bound_incoherent_xs = 0
+   real ( c_double ) :: c_bound_coherent_xs = 0
+   real ( c_double ) :: c_spr = 0
+   real ( c_double ) :: c_ncrystal_msd = 0   
+
+   character :: ncrystal_command*256
+   integer   :: nedge
+   real(kr)  :: bragg(maxb)
+   real(kr)  :: current_temp
+   integer   :: maxb
+   integer   :: atomic_z
+   integer   :: atomic_a
+   real(kr)  :: bound_incoherent_xs
+   real(kr)  :: bound_coherent_xs
+   real(kr)  :: spr
+   real(kr)  :: ncrystal_msd
+   integer   :: i
+   
+   ! initialize c_bragg to zero
+   c_bragg(:)=0
+   ! call the wrapper
+   call generate_bragg_edges( trim(ncrystal_command) // C_NULL_CHAR, c_nbragg, c_bragg, &
+   current_temp, maxb, atomic_z, atomic_a, c_bound_incoherent_xs, c_bound_coherent_xs,&
+   c_spr, c_ncrystal_msd )
+   
+   ! assign the passed back values to their LEAPR counterparts
+   nedge = c_nbragg
+   do i=1, 2*nedge
+     bragg(i) = c_bragg(i)
+   enddo
+   bound_incoherent_xs = c_bound_incoherent_xs
+   bound_coherent_xs = c_bound_coherent_xs
+   spr = c_spr
+   ncrystal_msd = c_ncrystal_msd
+
+   end subroutine ncrystal_wrapper
 
    subroutine coher(lat,natom,b,nbe,maxb,emax)
    !--------------------------------------------------------------------

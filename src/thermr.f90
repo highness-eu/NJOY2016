@@ -14,6 +14,26 @@ module thermm
    real(kr)::cliq
    integer::lasym
    integer::lat
+
+   !--------------------------------------------------------------------!
+   ! For low temperatures S(a,b) values get really small so we changed  !
+   ! the sabflg value to be even a smaller number. This in essence      !
+   ! extends the beta range at which SCT kicks in.                      !
+   !--------------------------------------------------------------------!
+   real(kr)::sabflg
+
+   !--------------------------------------------------------------------!
+   ! In the format change proposed at CSEWG, coherent elastic is        !
+   ! followed by incoherent elastic.                                    !
+   !                                                                    !
+   ! In this implementation we will load both to memory in that order.  !
+   ! Coherent elastic will be processed as usual, and incoherent elastic!
+   ! will be shifted in memory by a value named lthr_start.             !
+   !--------------------------------------------------------------------!
+   integer::lthr_start
+
+   character(len=60)::strng
+   
    real(kr),dimension(:),allocatable::scr
    real(kr),dimension(:),allocatable::bufo,bufn
 
@@ -26,7 +46,12 @@ module thermm
    ! arrays for thermal inelastic cross section
    real(kr),dimension(:),allocatable::esi,xsi
 
-   integer,parameter::nbuf=1000
+   !--------------------------------------------------------------------!
+   ! We have also increased the size of nbuff so that it can handle     !
+   ! increased number of bragg edges in TSL ENDF files created with     !
+   ! ncrystal_wrapper.                                                  !
+   !--------------------------------------------------------------------!
+   integer,parameter::nbuf=1000000
    integer,parameter::nwscr=500000
 
 contains
@@ -136,6 +161,7 @@ contains
    !                (for temperatures greater than 3000,
    !                emax and the energy grid are scaled by
    !                temp/3000.  free gas only.)
+   !     sabflg     logarithm of minim S(alpha, beta) (def=-225)
    !
    !       nendf can be ENDF6 format (e.g., from leapr) while
    !       nin and nout are ENDF4 or 5 format, if desired.
@@ -172,6 +198,13 @@ contains
    allocate(bufn(nbuf))
    allocate(bufo(nbuf))
    scr=0
+   
+   !--------------------------------------------------------------------!
+   ! This is not part of the modifications, but it is a good practice   !
+   ! to initialize allocated arrays.                                    !
+   !--------------------------------------------------------------------!
+   bufn=0
+   bufo=0
 
    !--read user input.
    read(nsysi,*) nendf,nin,nout
@@ -197,7 +230,8 @@ contains
       eftmp2(i)=0
       if (matde.eq.0) eftemp(i)=tempr(i)
    enddo
-   read(nsysi,*) tol,emax
+   sabflg = -225.0_kr
+   read(nsysi,*) tol,emax,sabflg
 
    !--check for endf-6 format data
    call tpidio(nendf,0,0,scr,nb,nw)
@@ -224,13 +258,18 @@ contains
       if (matde.eq.1095) sz2=s1095
       if (matde.eq.1095) az2=a1095
       sb2=sz2
-      if (az2.ne.zero) sb2=sz2*((az2+1)/az2)**2
+      !--------------------------------------------------------------------!
+      ! We have fixed equality statements for reals by comparing against a !
+      ! tiny number epsilon_real defined in locale.f90. Only the first     !
+      ! occurance is commented about.                                      !
+      !--------------------------------------------------------------------!
+      if (abs(az2-zero).gt.epsilon_real) sb2=sz2*((az2+1)/az2)**2
 
          !--default effective temperatures to standard values if
          !--available, otherwise set them to the material temperature
          if (matde.ne.0) then
             call gateff(tempr,eftemp,ntemp,matde)
-            if (sz2.ne.zero) then
+            if (abs(sz2-zero).gt.epsilon_real) then
                call gatef2(tempr,eftmp2,ntemp,matde)
             endif
          endif
@@ -272,7 +311,7 @@ contains
         eftemp(1)
       if (ntemp.gt.1) write(nsyso,'(40x,1p,e10.4)')&
         (eftemp(i),i=2,ntemp)
-      if (sz2.ne.zero) then
+      if (abs(sz2-zero).gt.epsilon_real) then
          write(nsyso,'(&
            &'' free xsec for second atom ............ '',1p,e10.4/&
            &'' mass ratio for second atom ........... '',1p,e10.4/&
@@ -395,6 +434,13 @@ contains
    call skiprz(nin,-1)
 
    !--set up for elastic calculation
+   !--------------------------------------------------------------------!
+   ! Elastic calculations are done in three steps:                      !
+   ! 1. rdelas() reads the header of the TSL ENDF-6 file                !
+   ! 2. then coh() or iel() are called to compute the elastic xs        !
+   ! 3. finally tpend() is called to save the processed file            !
+   !--------------------------------------------------------------------!
+
    if (iverf.ge.6.and.nendf.ne.0) then
       call findf(matde,7,0,nendf)
       call contio(nendf,0,0,scr,nb,nw)
@@ -417,10 +463,37 @@ contains
    endif
 
    !--compute thermal elastic cross sections
-   if (icoh.gt.0.and.icoh.le.10) then
-      call coh(icoh,itemp,iold,inew,np,nex)
-   else if (icoh.gt.10) then
-      call iel(icoh,itemp,iold,inew,np,nex)
+   !--------------------------------------------------------------------!
+   ! For lthr<3 we do the regular stuff                                 !
+   !--------------------------------------------------------------------!
+   if (lthr.lt.3 ) then
+       if (icoh.gt.0.and.icoh.le.10) then
+          write(strng,'("Material is a coherent scatterer.", &
+         & " Set ielas=0 in ACER")')
+          call mess('thermr',strng,'')
+          call coh(icoh,itemp,iold,inew,np,nex)
+       else if (icoh.gt.10) then
+          write(strng,'("Material is an incoherent scatterer.", &
+         & " Set ielas=1 in ACER")')
+          call iel(icoh,itemp,iold,inew,np,nex)
+       endif
+   !--------------------------------------------------------------------!
+   ! for lthr=3 we compute both the coherent and incoherent elastic xs  !
+   !--------------------------------------------------------------------!
+   else if(lthr.eq.3) then
+       !--------------------------------------------------------------------!
+       ! lhtr was read in rdelas(). From this point, instead of using       !
+       ! icoh to decide between coherent and incoherent, we force them to be!
+       ! called in sequence.                                                !
+       !--------------------------------------------------------------------! 
+
+       write(strng,'("Material is a mixed scatterer.", &
+       & " Set ielas=2 in ACER")')
+       call mess('thermr',strng,'')
+       icoh = 10
+       call coh(icoh,itemp,iold,inew,np,nex)
+       icoh = 20
+       call iel(icoh,itemp,iold,inew,np,nex)
    endif
 
    !--write new pendf tape.
@@ -476,13 +549,31 @@ contains
    ! internals
    integer::l,np,nr,lt,nb,nw,k,i
    real(kr)::tnow
-   real(kr),dimension(:),allocatable::a
-   integer,parameter::na=10000
+
+   !--------------------------------------------------------------------!
+   ! In rdelas() the header of the elastic section is read into         !
+   ! the a(:) array and moved into the fl(:) array. We setup a new      !
+   ! dummy array to read things that do not need to be saved. We also   !
+   ! increase na array size to handle more bragg edges from LEAPR with  !
+   ! with ncrystal_wrapper.                                             !
+   !--------------------------------------------------------------------!
+   real(kr),dimension(:),allocatable::a,dummy 
+   integer,parameter::na=10000000
 
    !--temp storage to read in data
    allocate(a(na))
+   !--------------------------------------------------------------------!
+   ! We allocate the dummy array                                        !
+   !--------------------------------------------------------------------!
+   allocate(dummy(na))
 
    !--read in main record
+   !--------------------------------------------------------------------!
+   ! lthr_start is going to store the shift in the fl(:) array where the! 
+   ! incoherent parameters are going to be stored for mixed elastic     !
+   !--------------------------------------------------------------------!
+   lthr_start=0
+
    l=1
    call tab1io(nin,0,0,a(l),nb,nw)
    np=n2h
@@ -501,6 +592,13 @@ contains
 
       !--search for desired temperature
       do while (abs(tnow-temp).ge.temp/1000+5)
+         !--------------------------------------------------------------------!
+         ! For coherent scattering (lthr = 1) this loop reads the record and  !
+         ! checks the temperature.                                            !
+         ! Once the right temperature is found, the Bragg edges are read and  !
+         ! stored in the a(:) array.                                          !
+         !--------------------------------------------------------------------!
+
          if (lt.eq.0.or.tnow.gt.temp)&
            call error('rdelas','desired temp not found.',' ')
          lt=lt-1
@@ -520,6 +618,33 @@ contains
             a(k)=a(l)
          enddo
       enddo
+   endif
+
+   if (lthr.eq.3) then
+       !--------------------------------------------------------------------!
+       ! For lthr=3 we skip rest of the temperatures and search for         !
+       ! incoherent record. Since the incoherent parameters are located just!
+       ! after the coherent parameters, we have to read all the temperatures!
+       ! to skip them.                                                      !
+       !--------------------------------------------------------------------!
+
+       if (lt.gt.0) then
+        do i=lt, 1, -1
+          call listio(nin,0,0,dummy(1),nb,nw)
+          tnow=dummy(1)
+          l=l+nw
+          do while (nb.ne.0)
+              call moreio(nin,0,0,dummy(l),nb,nw)
+              l=l+nw
+          enddo
+        end do
+       endif
+       !--------------------------------------------------------------------!
+       ! Here we read the incoherent parameters.                            !
+       !--------------------------------------------------------------------!
+       lthr_start = l - 1
+       call tab1io(nin,0,0,a(l),nb,nw)
+       nwds=lthr_start+nw
    endif
 
    !--move data to global fl array
@@ -623,7 +748,7 @@ contains
    real(kr),parameter::zero=0
 
    do i=1,ntemp
-      if (eftemp(i).eq.zero) then
+      if (abs(eftemp(i)-zero).lt.epsilon_real) then
          do j=1,ntabl
             jmat=nint(tabl(1,j))
             if (jmat.eq.mat) then
@@ -634,7 +759,7 @@ contains
                endif
             endif
          enddo
-         if (eftemp(i).eq.zero) eftemp(i)=temp(i)
+         if (abs(eftemp(i)-zero).lt.epsilon_real) eftemp(i)=temp(i)
       endif
    enddo
    return
@@ -668,7 +793,7 @@ contains
    real(kr),parameter::zero=0
 
    do i=1,ntemp
-      if (eftmp2(i).eq.zero) then
+      if (abs(eftmp2(i)-zero).lt.epsilon_real) then
          do j=1,ntabl
             jmat=nint(tabl(1,j))
             if (jmat.eq.mat) then
@@ -679,7 +804,7 @@ contains
                endif
             endif
          enddo
-         if (eftmp2(i).eq.zero) eftmp2(i)=temp(i)
+         if (abs(eftmp2(i)-zero).lt.epsilon_real) eftmp2(i)=temp(i)
       endif
    enddo
    return
@@ -944,6 +1069,11 @@ contains
    real(kr),parameter::eps=0.05e0_kr
    real(kr),parameter::zero=0
    save k,recon,scon
+   !--------------------------------------------------------------------!
+   ! Calculation of the coherent elastic cross section is               !
+   ! completely unchanged. It does not know there is something          !
+   ! else coming after.                                                 !
+   !--------------------------------------------------------------------!
 
    !--initialize.
    if (e.gt.zero) go to 210
@@ -984,7 +1114,7 @@ contains
    wint=cw*amsc*wal2
    t2=hbar/(2*amu*amsc)
    ulim=econ*emax
-   nw=10000
+   nw=1000000
    allocate(wrk(nw))
 
    !--compute and sort lattice factors.
@@ -1221,6 +1351,14 @@ contains
    if (iprint.eq.2) write(nsyso,'(/'' iel''/)')
    temp=tempr(itemp)
    nj=nex+1
+   !--------------------------------------------------------------------!
+   ! Calculation of the incoherent elastic is changed in two parts:     !
+   ! 1. The position of the incoherent parameters in the f(:) array     !
+   !    is shifted by lthr_start.                                       !    
+   ! 2. The material number is increased by one. This way if mtref=221  !
+   !    for a mixed moderator mt=221 will be the inelastic reaction,    !
+   !    mt=222 the coherent elastic, and mt=223 the incoherent elastic. !
+   !--------------------------------------------------------------------!
 
    !--select material parameters
    if (mat.eq.11) then
@@ -1233,34 +1371,37 @@ contains
       dwa=terp(tmp,dwz,8,temp,3)
       sb=c13a
    else if (mat.eq.20) then
-      sb=fl(1)
-      nr=nint(fl(5))
-      np=nint(fl(6))
+      !--------------------------------------------------------------------!
+      ! This is the shift in memory.                                       !
+      !--------------------------------------------------------------------!
+      sb=fl(lthr_start+1)
+      nr=nint(fl(lthr_start+5))
+      np=nint(fl(lthr_start+6))
       if (np.eq.1) then
-         tt1=fl(7+2*nr)
+         tt1=fl(lthr_start+7+2*nr)
          if (abs(temp-tt1).gt.temp/10) call error('iel',&
            'bad temperature for debye-waller factor',' ')
-         dwa=fl(8+2*nr)
+         dwa=fl(lthr_start+8+2*nr)
       else
-         tt1=fl(7+2*nr)
-         ttn=fl(5+2*nr+2*np)
+         tt1=fl(lthr_start+7+2*nr)
+         ttn=fl(lthr_start+5+2*nr+2*np)
          if (temp.lt.dn*tt1.or.temp.gt.up*ttn) call error('iel',&
            'bad temperature for debye-waller factor',' ')
-         if (tt1.gt.temp) fl(7+2*nr)=temp
-         if (ttn.lt.temp) fl(5+2*nr+2*np)=temp
+         if (tt1.gt.temp) fl(lthr_start+7+2*nr)=temp
+         if (ttn.lt.temp) fl(lthr_start+5+2*nr+2*np)=temp
          ip=2
          ir=1
-         call terpa(dwa,temp,tnxt,idis,fl,ip,ir)
+         call terpa(dwa,temp,tnxt,idis,fl(lthr_start+1),ip,ir)
       endif
    else
       call error('iel','unknown material identifier.',' ')
    endif
-   c1=sb/(2*natom)
+   c1=sb/2.0
 
    !--check on calcem energy grid
    nne=0
    do
-     if (esi(nne+1).eq.0) exit
+     if (abs(esi(nne+1)-0).lt.epsilon_real) exit
      nne=nne+1
    enddo
    allocate(xie(nne))
@@ -1271,6 +1412,12 @@ contains
    math=matdp
    mfh=6
    mth=mtref+1
+
+   !--------------------------------------------------------------------!
+   ! This is the increment in the reaction number                       !
+   !--------------------------------------------------------------------!
+   if (lthr_start.gt.0) mth=mtref+2
+
    scr(1)=za
    scr(2)=awr
    scr(3)=0
@@ -1542,7 +1689,6 @@ contains
      4.07e0_kr,4.46e0_kr,4.90e0_kr,5.35e0_kr,5.85e0_kr,6.40e0_kr,&
      7.00e0_kr,7.65e0_kr,8.40e0_kr,9.15e0_kr,9.85e0_kr,10.00e0_kr/)
    real(kr),parameter::unity=1.0e0_kr
-   real(kr),parameter::sabflg=-225.e0_kr
    real(kr),parameter::eps=1.e-4_kr
    real(kr),parameter::tolmin=5.e-7_kr
    real(kr),parameter::half=0.5e0_kr
@@ -1615,11 +1761,11 @@ contains
       sb2=0
       az2=0
       if (ni.gt.6) then
-         if (scr(13).eq.zero) az2=scr(15)
-         if (az2.ne.zero) sb2=scr(14)*((az2+1)/az2)**2
+         if (abs(scr(13)-zero).lt.epsilon_real) az2=scr(15)
+         if (abs(az2-zero).gt.epsilon_real) sb2=scr(14)*((az2+1)/az2)**2
          sb2=sb2/scr(18)/natom
          if (ni.gt.12) then
-            if (scr(19).eq.zero)&
+            if (abs(scr(19)-zero).lt.epsilon_real)&
               call error('calcem','only 2 sct atoms allowed.',' ')
          endif
       endif
@@ -1678,7 +1824,7 @@ contains
         &1p,e10.2)') diff
    endif
    l=loc+6
-   if (t.eq.t1) l=l+2*nint(scr(loc+4))+1
+   if (abs(t-t1).lt.epsilon_real) l=l+2*nint(scr(loc+4))+1
    do ia=1,nalpha
       if (ilog.eq.0) then
          if (scr(l).gt.sabmin) sab(ia,ib)=log(scr(l))
@@ -1689,7 +1835,7 @@ contains
       else
          sab(ia,ib)=scr(l)
       endif
-      if (t.eq.t1) l=l+1
+      if (abs(t-t1).lt.epsilon_real) l=l+1
       l=l+1
    enddo
    do while (it.lt.lt)
@@ -1768,7 +1914,7 @@ contains
       if (ttn.lt.tempt) scr(5+2*nr+2*np)=tempt
       call terpa(teff,tempt,tnxt,idis,scr,ip,ir)
    endif
-   if (sb2.eq.zero) go to 300
+   if (abs(sb2-zero).lt.epsilon_real) go to 300
    call tab1io(nendf,0,0,scr,nb,nw)
    nr=nint(scr(5))
    np=nint(scr(6))
@@ -1944,7 +2090,7 @@ contains
       else
          ep=enow-beta(-jbeta)*tev
       endif
-      if (ep.eq.enow) then
+      if (abs(ep-enow).lt.epsilon_real) then
          ep=sigfig(enow,8,-1)
       else
          ep=sigfig(ep,8,0)
@@ -1955,7 +2101,7 @@ contains
       else
          ep=enow+beta(jbeta)*tev
       endif
-      if (ep.eq.enow) then
+      if (abs(ep-enow).lt.epsilon_real) then
          ep=sigfig(enow,8,+1)
          iskip=1
       else
@@ -2064,7 +2210,7 @@ contains
    enddo
    xlast=x(i)
    ylast=y(1,i)
-   if (ylast.ne.zero) jnz=j
+   if (abs(ylast-zero).gt.epsilon_real) jnz=j
    ulast=0
    u2last=0
    u3last=0
@@ -2137,7 +2283,7 @@ contains
          scr(il+jscr)=-unity
       endif
    enddo
-   if (y(1,1).ne.zero) jnz=j
+   if (abs(y(1,1)-zero).gt.epsilon_real) jnz=j
    if (jnz.lt.j) j=jnz+1
    if (iprint.eq.2) then
       ubar(ie)=ubar(ie)/xsi(ie)
@@ -2432,7 +2578,6 @@ contains
    real(kr)::rtev,bb,a,sigc,b,c,bbb,s,s1,s2,s3,arg
    real(kr)::tfff,tfff2,rat
    real(kr),parameter::sigmin=1.e-10_kr
-   real(kr),parameter::sabflg=-225.e0_kr
    real(kr),parameter::amin=1.e-6_kr
    real(kr),parameter::test1=0.2e0_kr
    real(kr),parameter::test2=30.e0_kr
@@ -2472,7 +2617,7 @@ contains
       ia=i
       if (a.lt.alpha(i+1)) exit
    enddo
-   if (cliq.eq.zero.or.a.ge.alpha(1)) go to 150
+   if ((abs(cliq-zero).lt.epsilon_real).or.(a.ge.alpha(1))) go to 150
    if (lasym.eq.1) go to 150
    if (b.gt.test1) go to 150
    s=sab(1,1)+log(alpha(1)/a)/2-cliq*b**2/a
@@ -2561,7 +2706,6 @@ contains
    real(kr)::x1,y1,x2,y2,x3,y3,x,y
    ! internals
    real(kr)::b,c
-   real(kr),parameter::sabflg=-225.e0_kr
    real(kr),parameter::step=2.e0_kr
 
    if (x.lt.x1) then
@@ -2633,7 +2777,7 @@ contains
    b=abs(b)
    if (lat.eq.1.and.iinc.eq.2) b=b*tev/tevz
    s1bb=sqrt(1+b*b)
-   if (ep.ne.zero) seep=1/sqrt(e*ep)
+   if (abs(ep-zero).gt.epsilon_real) seep=1/sqrt(e*ep)
 
    !--adaptive calculation of cross section
    i=3
@@ -2642,8 +2786,8 @@ contains
    xl=x(3)
    y(3)=sig(e,ep,x(3),tev,nalpha,alpha,nbeta,beta,sab)
    yl=y(3)
-   if (ep.eq.zero) x(2)=0
-   if (ep.ne.zero) x(2)=half*(e+ep-(s1bb-1)*az*tev)*seep
+   if (abs(ep-zero).lt.epsilon_real) x(2)=0
+   if (abs(ep-zero).gt.epsilon_real) x(2)=half*(e+ep-(s1bb-1)*az*tev)*seep
    if (abs(x(2)).gt.1-eps) x(2)=0.99e0_kr
    x(2)=sigfig(x(2),8,0)
    y(2)=sig(e,ep,x(2),tev,nalpha,alpha,nbeta,beta,sab)
@@ -2702,8 +2846,8 @@ contains
    x(3)=-1
    xl=x(3)
    y(3)=sig(e,ep,x(3),tev,nalpha,alpha,nbeta,beta,sab)
-   if (ep.eq.zero) x(2)=0
-   if (ep.ne.zero) x(2)=half*(e+ep-(s1bb-1)*az*tev)*seep
+   if (abs(ep-zero).lt.epsilon_real) x(2)=0
+   if (abs(ep-zero).gt.epsilon_real) x(2)=half*(e+ep-(s1bb-1)*az*tev)*seep
    if (abs(x(2)).gt.1-eps) x(2)=0.99e0_kr
    x(2)=sigfig(x(2),8,0)
    y(2)=sig(e,ep,x(2),tev,nalpha,alpha,nbeta,beta,sab)
@@ -2734,7 +2878,7 @@ contains
    !--check bins for this panel
   160 continue
    add=half*(y(i)+yl)*(x(i)-xl)
-   if (x(i).eq.xl) go to 250
+   if (abs(x(i)-xl).lt.epsilon_real) go to 250
    xil=1/(x(i)-xl)
    if (i.eq.1.and.j.eq.nbin-1) go to 165
    if (sum+add.ge.fract*shade.and.j.lt.nbin-1) go to 170
@@ -2862,7 +3006,7 @@ contains
          x(1)=e-beta(-jbeta)*tev
       endif
       x(1)=sigfig(x(1),8,0)
-      if (x(1).eq.e) x(1)=sigfig(e,8,-1)
+      if (abs(x(1)-e).lt.epsilon_real) x(1)=sigfig(e,8,-1)
    else
       if (lat.eq.1) then
          x(1)=e+beta(jbeta)*tevz
@@ -3004,11 +3148,16 @@ contains
    enddo
    nw=6*nx
    allocate(dico(nw))
+   dico=0
+
    nw=6*nx
    if (iinc.gt.0) nw=nw+12
    if (icoh.gt.0) nw=nw+12
+   if (lthr_start.gt.0) nw=nw+12 
    allocate(dicn(nw))
+   dicn=0
    allocate(sav(6))
+   sav=0
    nc=nx
    call dictio(nin,0,0,dico,nb,nc)
    do i=1,nw
@@ -3239,7 +3388,7 @@ contains
       call tab2io(nscr,nout,0,scr,nb,nw)
       nne=n2h
       do ie=1,nne
-         if (xsi(ie).eq.zero)&
+         if (abs(xsi(ie)-zero).lt.epsilon_real)&
            call error('tpend','cross section=0.',' ')
          rxsec=1/xsi(ie)
          indx=1
