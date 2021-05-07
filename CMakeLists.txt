@@ -11,7 +11,7 @@ if ( NJOY_NCRYSTAL )
     FetchContent_Declare(
         NCrystal
         GIT_REPOSITORY  https://github.com/highness-eu/ncrystal.git
-        GIT_TAG         origin/develop
+        GIT_TAG         5c6cba86d8ab2cca0bb011868cd1b5ce23b2547d #v2.6.1_njoyncrystal
     )
     FetchContent_GetProperties(NCrystal)
     if (NOT NCrystal_POPULATED)
