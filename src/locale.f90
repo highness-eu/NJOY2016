@@ -16,5 +16,11 @@ module locale
    integer,parameter,public::kr=selected_real_kind(12,300)
    integer,parameter,public::k4=4
    integer,parameter,public::k8=8
+   !--------------------------------------------------------------------!
+   ! We have fixed equality statements for reals (in acer,aceth,thermr, !
+   ! and leapr by comparing against a tiny number epsilon_real defined  !
+   ! here.                                                              !
+   !--------------------------------------------------------------------!
+   real(kr),parameter,public::epsilon_real=epsilon(0.0_kr)
 end module locale
 
