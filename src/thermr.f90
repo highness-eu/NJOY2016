@@ -475,6 +475,7 @@ contains
        else if (icoh.gt.10) then
           write(strng,'("Material is an incoherent scatterer.", &
          & " Set ielas=1 in ACER")')
+          call mess('thermr',strng,'')
           call iel(icoh,itemp,iold,inew,np,nex)
        endif
    !--------------------------------------------------------------------!

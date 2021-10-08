@@ -247,6 +247,9 @@ contains
    real(kr)::bound_incoherent_xs,bound_coherent_xs
    integer::coherent_or_incoherent,ntemp_elastic,atomic_z,atomic_a
    real(kr)::ncrystal_msd,leapr_msd,hbar_mine,mass_neutron
+   real(kr)::incoherent_fract, fract
+   integer::redistribute_this
+   integer::base_iel
 
    !--initialize
    call timer(time)
@@ -436,7 +439,9 @@ contains
          write(nsyso,'(/'' secondary scatterer...''/&
            &'' input alpha values divided by'',f7.3)') arat
       endif
+      base_iel = iel
       do itemp=1,ntempr
+         iel = base_iel
          read(nsysi,*) temp
          tempr(itemp)=abs(temp)
          write(nsyso,'(/'' doing temp ='',f10.2)') temp
@@ -513,7 +518,7 @@ contains
             current_temp(itemp)=abs(temp)
             call ncrystal_wrapper(ncrystal_command, bragg(:,itemp), nedge(itemp), maxb, &
             current_temp(itemp), atomic_z, atomic_a, bound_incoherent_xs, bound_coherent_xs, spr, &
-            ncrystal_msd)
+            ncrystal_msd, incoherent_fract, fract, redistribute_this)
             leapr_msd=dwpix(itemp)/(awr*bk*current_temp(itemp))*hbar_mine**2/(2*mass_neutron)
             write(nsyso,'(/&
               &  '' NCrystal MSD ......................... '',es10.3/&
@@ -532,24 +537,41 @@ contains
                enddo
             endif
 
-            if (iel.eq.98 .or. iel.eq.99) then
+            if (iel.eq.98 ) then
                if (bound_coherent_xs.gt.bound_incoherent_xs) then
                   coherent_or_incoherent=1
-                  if (iel.eq.99) then
-                     do i=1,nedge(itemp)
-                        bragg(2*i,itemp) = bragg(2*i,itemp)/bound_coherent_xs*&
-                        (bound_coherent_xs+bound_incoherent_xs)                
-                     enddo
-                  endif
-               else if (bound_coherent_xs.lt.bound_incoherent_xs) then
+               else 
                   coherent_or_incoherent=2
-                  if (iel.eq.99) then
+               endif
+            endif 
+            if (iel.eq.99) then
+               if (abs(fract - 1.0 ).lt.epsilon_real) then
+               ! Single atom case
+                  if (bound_coherent_xs.gt.bound_incoherent_xs) then
+                      do i=1,nedge(itemp)
+                         bragg(2*i,itemp) = (bound_incoherent_xs+bound_coherent_xs)/bound_coherent_xs*bragg(2*i,itemp)
+                      enddo
+                  coherent_or_incoherent=1
+                  else 
+                     coherent_or_incoherent=2
                      bound_incoherent_xs=bound_incoherent_xs+bound_coherent_xs
+                  endif
+               else
+              ! Multiple atom or molecule case
+                  if (redistribute_this == 1) then
+                      coherent_or_incoherent=1
+                      do i=1,nedge(itemp)
+                         bragg(2*i,itemp) = bragg(2*i,itemp)/fract
+                      enddo
+                  else
+                      coherent_or_incoherent=2
+                      bound_incoherent_xs=bound_incoherent_xs+incoherent_fract
                   endif
                endif
             endif 
             if (iel.eq.100 .and. bound_incoherent_xs < 1e-6*bound_coherent_xs ) then
                iel = 99
+               coherent_or_incoherent=1
                write(nsyso,'(/&
                 &''*** Warning. sigma_inc < 1e-6*sigma_coh. '',&
                 &''Material will be treated as coherent, not mixed ***'')')
@@ -2626,7 +2648,8 @@ contains
    ! Here we define ncrystal_wrapper!!!                                 !
    !--------------------------------------------------------------------!  
    subroutine ncrystal_wrapper(ncrystal_command, bragg, nedge, maxb, current_temp, &
-   atomic_z, atomic_a, bound_incoherent_xs,bound_coherent_xs, spr, ncrystal_msd)
+   atomic_z, atomic_a, bound_incoherent_xs,bound_coherent_xs, spr, ncrystal_msd, &
+   incoherent_fract, fract, redistribute_this)
    !--------------------------------------------------------------------!
    ! Computes Bragg edges (energy times cross section) for coherent     !
    ! elastic scattering by calling NCrystal. Also obtains the incoherent!
@@ -2641,7 +2664,8 @@ contains
    interface
      subroutine generate_bragg_edges( c_s, c_nbragg, c_bragg, c_current_temp, &
      c_maxb, c_atomic_z, c_atomic_a, c_bound_incoherent_xs, &
-     c_bound_coherent_xs, c_spr ,c_ncrystal_msd) bind ( c )
+     c_bound_coherent_xs, c_spr ,c_ncrystal_msd, c_incoherent_fraction, c_fraction, &
+     c_redistribute_this ) bind ( c )
        use iso_c_binding
        character(len=1, kind=c_char), dimension(*), intent(in) :: c_s
        integer ( c_int ) :: c_nbragg
@@ -2654,6 +2678,9 @@ contains
        real ( c_double ) :: c_bound_coherent_xs
        real ( c_double ) :: c_spr
        real ( c_double ) :: c_ncrystal_msd
+       real ( c_double ) :: c_incoherent_fraction
+       real ( c_double ) :: c_fraction
+       integer ( c_int ) :: c_redistribute_this
 
      end subroutine generate_bragg_edges
    end interface
@@ -2664,6 +2691,9 @@ contains
    real ( c_double ) :: c_bound_coherent_xs = 0
    real ( c_double ) :: c_spr = 0
    real ( c_double ) :: c_ncrystal_msd = 0   
+   real ( c_double ) :: c_incoherent_fraction = 0   
+   real ( c_double ) :: c_fraction = 0   
+   integer ( c_int ) :: c_redistribute_this = 0
 
    character :: ncrystal_command*256
    integer   :: nedge
@@ -2676,6 +2706,9 @@ contains
    real(kr)  :: bound_coherent_xs
    real(kr)  :: spr
    real(kr)  :: ncrystal_msd
+   real(kr)  :: incoherent_fract
+   real(kr)  :: fract
+   integer   :: redistribute_this
    integer   :: i
    
    ! initialize c_bragg to zero
@@ -2683,7 +2716,7 @@ contains
    ! call the wrapper
    call generate_bragg_edges( trim(ncrystal_command) // C_NULL_CHAR, c_nbragg, c_bragg, &
    current_temp, maxb, atomic_z, atomic_a, c_bound_incoherent_xs, c_bound_coherent_xs,&
-   c_spr, c_ncrystal_msd )
+   c_spr, c_ncrystal_msd, c_incoherent_fraction, c_fraction, c_redistribute_this )
    
    ! assign the passed back values to their LEAPR counterparts
    nedge = c_nbragg
@@ -2694,6 +2727,9 @@ contains
    bound_coherent_xs = c_bound_coherent_xs
    spr = c_spr
    ncrystal_msd = c_ncrystal_msd
+   incoherent_fract = c_incoherent_fraction
+   fract = c_fraction
+   redistribute_this = c_redistribute_this
 
    end subroutine ncrystal_wrapper
 
