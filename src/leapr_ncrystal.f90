@@ -528,6 +528,7 @@ contains
               &  '' LEAPR MSD ............................ '',es10.3)')&
               &  ncrystal_msd, leapr_msd
 
+            last_edge(itemp) = new_bragg(2*nedge(itemp), itemp)
             if (itemp .gt. 1) then
                if (current_temp(itemp).lt.current_temp(itemp-1)) then
                   strng = 'Temperatures need to be in the increasing order.'
@@ -607,10 +608,20 @@ contains
       allocate(bragg(maxb,1))
    else if (iel.ge.98) then
       ! Copy Bragg edges for first temperature
-      do i=0, nedge(1)-1
-         bragg(2*i+1,1) = new_bragg(2*i+1, 1)
-         bragg(2*i+2,1) = new_bragg(2*i+2, 1)
+      bragg(:,1) = 0
+      bragg(1, 1) = new_bragg(1, 1)
+      bragg(2, 1) = new_bragg(2, 1)
+      newi = 0
+      do i=1, nedge(1)-1
+         if (abs(bragg(2*newi+1,1) - new_bragg(2*i+1,1)).gt.epsilon_real) then
+           newi = newi + 1
+           bragg(2*newi+1,1) = new_bragg(2*i+1, 1)
+           bragg(2*newi+2,1) = new_bragg(2*i+2, 1)
+         else
+           bragg(2*newi+2,1) = bragg(2*newi+2,1) + new_bragg(2*i+2, 1)
+         endif
       enddo
+      nedge(1) = newi
       ! Add any additional Bragg edges from other temperatures to the energy list
       do itemp=2,ntempr
         do i=0, nedge(itemp)-1
@@ -644,16 +655,21 @@ contains
         enddo
         if (.not. swapped) exit
       enddo
-      ! Pad other temperatures with zeros if the Bragg edge is not present
+      ! Map Bragg edges to the grid for the first temperature
+      ! Pad the list of Bragg edges above the last value if necesary
       do itemp=2,ntempr
+        bragg(:,itemp) = 0
         newi = 0
         do i=0, nedge(1)-1
-          if (abs(bragg(2*i+1,1) - new_bragg(2*newi+1, itemp)).lt.epsilon_real) then
-              bragg(2*i+2,itemp) = new_bragg(2*newi+2, itemp)
-              newi = newi + 1
+          if (bragg(2*i+1,1) .gt. new_bragg(2*(nedge(itemp)-1)+1, itemp)) then
+            bragg(2*i+1,1) = last_edge(itemp)
           else
-              bragg(2*i+2,itemp) = 0
-          endif
+            do newi=0, nedge(itemp)-1
+              if (abs(bragg(2*i+1,1) - new_bragg(2*newi+1, itemp)).lt.epsilon_real) then
+                  bragg(2*i+2,itemp) = bragg(2*i+2,itemp) + new_bragg(2*newi+2, itemp)
+              endif
+            enddo
+          endif 
         enddo
       enddo
    endif
