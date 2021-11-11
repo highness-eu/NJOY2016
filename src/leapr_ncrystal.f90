@@ -225,7 +225,7 @@ contains
    use physics ! provides bk (boltzmann constant)
    use util    ! provides timer,openz,error,mess
    ! internals
-   integer::itemp,idone,i,ntempr,isabt,ilog,ni
+   integer::itemp,idone,i,ntempr,isabt,ilog,ni,newi,j
    integer::isym,mscr,maxb,isecs
    real(kr)::time
    character(4)::title(20)
@@ -239,6 +239,7 @@ contains
    ! implementation.                                                    !
    !--------------------------------------------------------------------!
    real(kr),dimension(:,:),allocatable::bragg
+   real(kr),dimension(:,:),allocatable::new_bragg
    integer,dimension(:),allocatable::nedge
    real(kr),dimension(:),allocatable::last_edge
    real(kr),dimension(:),allocatable::scr
@@ -250,6 +251,7 @@ contains
    real(kr)::incoherent_fract, fract
    integer::redistribute_this
    integer::base_iel
+   logical::found, swapped
 
    !--initialize
    call timer(time)
@@ -380,6 +382,7 @@ contains
       ntemp_elastic = ntempr
       maxb=10000000
       allocate(bragg(maxb,ntemp_elastic))
+      allocate(new_bragg(maxb,ntemp_elastic))
       allocate(nedge(ntemp_elastic))
       allocate(last_edge(ntemp_elastic))
       allocate(current_temp(ntemp_elastic))
@@ -516,7 +519,7 @@ contains
          
          if (iel.ge.98) then
             current_temp(itemp)=abs(temp)
-            call ncrystal_wrapper(ncrystal_command, bragg(:,itemp), nedge(itemp), maxb, &
+            call ncrystal_wrapper(ncrystal_command, new_bragg(:,itemp), nedge(itemp), maxb, &
             current_temp(itemp), atomic_z, atomic_a, bound_incoherent_xs, bound_coherent_xs, spr, &
             ncrystal_msd, incoherent_fract, fract, redistribute_this)
             leapr_msd=dwpix(itemp)/(awr*bk*current_temp(itemp))*hbar_mine**2/(2*mass_neutron)
@@ -530,11 +533,6 @@ contains
                   strng = 'Temperatures need to be in the increasing order.'
                   call error('leapr',strng,' ') 
                endif
-               last_edge(itemp) = bragg(2*nedge(itemp), itemp)
-               do i=nedge(itemp),nedge(1)
-                   bragg(2*i+1,itemp) = bragg(2*i+1,1)
-                   bragg(2*i+2,itemp) = last_edge(itemp)                 
-               enddo
             endif
 
             if (iel.eq.98 ) then
@@ -549,7 +547,7 @@ contains
                ! Single atom case
                   if (bound_coherent_xs.gt.bound_incoherent_xs) then
                       do i=1,nedge(itemp)
-                         bragg(2*i,itemp) = (bound_incoherent_xs+bound_coherent_xs)/bound_coherent_xs*bragg(2*i,itemp)
+                         new_bragg(2*i,itemp) = (bound_incoherent_xs+bound_coherent_xs)/bound_coherent_xs*new_bragg(2*i,itemp)
                       enddo
                   coherent_or_incoherent=1
                   else 
@@ -561,7 +559,7 @@ contains
                   if (redistribute_this == 1) then
                       coherent_or_incoherent=1
                       do i=1,nedge(itemp)
-                         bragg(2*i,itemp) = bragg(2*i,itemp)/fract
+                         new_bragg(2*i,itemp) = new_bragg(2*i,itemp)/fract
                       enddo
                   else
                       coherent_or_incoherent=2
@@ -607,6 +605,57 @@ contains
    else if (iel.eq.0) then
       maxb=1
       allocate(bragg(maxb,1))
+   else if (iel.ge.98) then
+      ! Copy Bragg edges for first temperature
+      do i=0, nedge(1)-1
+         bragg(2*i+1,1) = new_bragg(2*i+1, 1)
+         bragg(2*i+2,1) = new_bragg(2*i+2, 1)
+      enddo
+      ! Add any additional Bragg edges from other temperatures to the energy list
+      do itemp=2,ntempr
+        do i=0, nedge(itemp)-1
+          found = .false.
+          do j=0, nedge(1)-1
+            if (abs(bragg(2*j+1,1) - new_bragg(2*i+1, itemp)).lt.epsilon_real) then
+              found = .true.
+              exit
+            endif
+          enddo
+          if (.not. found) then
+             bragg(2*nedge(1)+1,1) = new_bragg(2*i+1, itemp)
+             bragg(2*nedge(1)+2,1) = 0
+             nedge(1) = nedge(1) + 1
+          endif
+        enddo
+      enddo
+      ! Sort energy list
+      do j = nedge(1) - 1, 0, -1
+        swapped = .false.
+        do i = 0, j-1
+          if (bragg(2*i+1,1) .gt. bragg(2*(i+1)+1,1)) then
+            temp = bragg(2*i+1,1)
+            bragg(2*i+1,1) = bragg(2*(i+1)+1,1)
+            bragg(2*(i+1)+1,1) = temp
+            temp = bragg(2*i+2,1)
+            bragg(2*i+2,1) = bragg(2*(i+1)+2,1)
+            bragg(2*(i+1)+2,1) = temp
+            swapped = .true.
+          endif
+        enddo
+        if (.not. swapped) exit
+      enddo
+      ! Pad other temperatures with zeros if the Bragg edge is not present
+      do itemp=2,ntempr
+        newi = 0
+        do i=0, nedge(1)-1
+          if (abs(bragg(2*i+1,1) - new_bragg(2*newi+1, itemp)).lt.epsilon_real) then
+              bragg(2*i+2,itemp) = new_bragg(2*newi+2, itemp)
+              newi = newi + 1
+          else
+              bragg(2*i+2,itemp) = 0
+          endif
+        enddo
+      enddo
    endif
 
    !--write output in endf format
