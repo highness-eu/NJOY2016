@@ -664,7 +664,7 @@ contains
           if (bragg(2*i+1,1) .gt. new_bragg(2*(nedge(itemp)-1)+1, itemp)) then
             bragg(2*i+1,1) = last_edge(itemp)
           else
-            do newi=0, nedge(itemp)-1
+            do newi=0, nedge(itemp)-2
               if (abs(bragg(2*i+1,1) - new_bragg(2*newi+1, itemp)).lt.epsilon_real) then
                   bragg(2*i+2,itemp) = bragg(2*i+2,itemp) + new_bragg(2*newi+2, itemp)
               endif
